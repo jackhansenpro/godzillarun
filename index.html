@@ -1,0 +1,972 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Godzilla Run</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#f7f7f7; --fg:#535353; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); }
+  body {
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    font-family:'Press Start 2P','Courier New',monospace; user-select:none; -webkit-user-select:none;
+    overflow:hidden;
+  }
+  #wrap { width:min(800px, calc(100vw - 32px)); }
+  h1 { font-size:14px; letter-spacing:4px; margin:0 0 14px; font-weight:normal; opacity:.75; }
+  canvas { width:100%; display:block; image-rendering:pixelated; touch-action:none; cursor:pointer; }
+  .help { font-size:9px; line-height:2.4; margin-top:18px; opacity:.7; text-align:center; }
+  kbd { border:2px solid currentColor; padding:2px 6px; margin:0 3px; font-family:inherit; font-size:9px; }
+  #touch { display:none; gap:10px; margin-top:16px; }
+  #touch button {
+    flex:1; font-family:inherit; font-size:11px; padding:20px 0; background:transparent;
+    color:inherit; border:3px solid currentColor; border-radius:0; touch-action:none;
+  }
+  #touch button:active { background:rgba(127,127,127,.25); }
+  @media (pointer:coarse) { #touch { display:flex; } .help { display:none; } }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>GODZILLA RUN</h1>
+  <canvas id="game"></canvas>
+  <div id="touch">
+    <button data-act="punch">PUNCH</button>
+    <button data-act="breath">ATOMIC BREATH</button>
+  </div>
+  <div class="help">
+    <kbd>SPACE</kbd> punch buildings (charges atomic breath) &nbsp; <kbd>↑</kbd>/<kbd>F</kbd> atomic breath &nbsp; <kbd>M</kbd> mute
+  </div>
+</div>
+<script>
+(() => {
+'use strict';
+// ---------- Godzilla sprite builder ----------
+// Procedural Godzilla sprite. Cell codes: '#' body, 'd' shadow/outline, 'l' belly light,
+// 'p' plate, 'e' eye (bg), 'w' teeth/claws (light)
+function buildGodzilla(pose) {
+  const WC = 64, OY = 6, HC = 42 + OY;
+  const g = Array.from({ length: HC }, () => Array(WC).fill('.'));
+  const id = Array.from({ length: HC }, () => Array(WC).fill(0));
+  const inE = (x, y, cx, cy, rx, ry) => ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2;
+  const capD = (x, y, ax, ay, bx, by) => {
+    const vx = bx - ax, vy = by - ay, t = Math.max(0, Math.min(1, ((x - ax) * vx + (y - ay) * vy) / (vx * vx + vy * vy)));
+    return Math.hypot(x - ax - vx * t, y - ay - vy * t);
+  };
+  const leg = pose.leg || 0;
+  // legs: [hip, knee/ankle, foot x]
+  const rearAnk = leg ? [21, 39] : [25, 39], frontAnk = leg ? [47, 39] : [43, 39];
+  const tail = [];
+  for (let t = 0; t <= 1.0001; t += 0.02) {
+    const P0 = [27, 31], P1 = [2, 44], P2 = [5, 9];
+    const x = (1-t)*(1-t)*P0[0] + 2*(1-t)*t*P1[0] + t*t*P2[0];
+    const y = (1-t)*(1-t)*P0[1] + 2*(1-t)*t*P1[1] + t*t*P2[1];
+    tail.push([x, y, 6.5 * (1 - t) + 0.8 * t, t]);
+  }
+  function isBody(x, y) {
+    if (inE(x, y, 35, 22, 11.5, 11) <= 1) return true;           // torso
+    if (inE(x, y, 43, 14, 7, 7) <= 1) return true;               // chest
+    if (inE(x, y, 46.5, 9.5, 4.5, 5) <= 1) return true;          // neck
+    if (inE(x, y, 51, 6.5, 5, 3.6) <= 1) return true;            // skull
+    if (x >= 49 && x <= 57.5 && y >= 5 && y <= 9 && !(x > 56 && y < 6.2)) return true;  // snout
+    if (pose.mouth === 'open') { if (x >= 47 && x <= 55.5 && y >= 11 && y <= 13) return true; if (x >= 46 && x <= 51 && y >= 9 && y < 11) return true; }
+    else if (x >= 48 && x <= 56 && y >= 9 && y <= 11.4) return true;  // jaw
+    if (inE(x, y, 38, 27, 9.5, 8.5) <= 1) return true;           // belly
+    if (inE(x, y, 27, 31, 7.5, 6.5) <= 1) return true;           // rear thigh
+    if (inE(x, y, 41, 31, 7, 6.5) <= 1) return true;             // front thigh
+    if (capD(x, y, 26, 34, rearAnk[0], rearAnk[1]) <= 2.9) return true;
+    if (capD(x, y, 42, 34, frontAnk[0], frontAnk[1]) <= 2.9) return true;
+    if (y >= 39 && y < 42 && x >= rearAnk[0] - 3 && x <= rearAnk[0] + 4.5) return true;   // feet
+    if (y >= 39 && y < 42 && x >= frontAnk[0] - 3 && x <= frontAnk[0] + 4.5) return true;
+    if (pose.punch) { if (capD(x, y, 46, 17, 58, 15) <= 2) return true; if (Math.hypot(x - 59.5, y - 15) <= 2.6) return true; }
+    else if (capD(x, y, 46, 17, 52, 20.5) <= 1.7) return true;
+    for (const [tx, ty, r] of tail) if (Math.hypot(x - tx, y - ty) <= r) return true;
+    return false;
+  }
+  for (let y = 0; y < HC; y++) for (let x = 0; x < WC; x++) if (isBody(x + .5, y + .5 - OY)) g[y][x] = '#';
+
+  // dorsal plates: [spine x, spine y, height]
+  const dir = [-0.5, -0.87];
+  const plates = [[47,5,5],[44,7,9],[41,8,13],[37,10,16],[33,12,17],[29,15,15],[26,18,12],[23,22,9],[20,26,6],
+                  [42,10,8],[35,13,12],[28,18,10],[24,22,7]];   // second, shorter row
+  const inTri = (px, py, a, b, c) => {
+    const s = (p, q, r) => (p[0] - r[0]) * (q[1] - r[1]) - (q[0] - r[0]) * (p[1] - r[1]);
+    const p = [px, py], d1 = s(p, a, b), d2 = s(p, b, c), d3 = s(p, c, a);
+    return !(((d1 < 0) || (d2 < 0) || (d3 < 0)) && ((d1 > 0) || (d2 > 0) || (d3 > 0)));
+  };
+  plates.forEach(([bx, by, h], i) => {
+    const bw = Math.max(1.6, h * 0.3), px = -dir[1], py = dir[0];     // perpendicular
+    const tip = [bx + dir[0] * h, by + dir[1] * h];
+    const a = [bx + px * bw, by + py * bw], b = [bx - px * bw, by - py * bw];
+    // side notch spike makes it read like a maple-leaf plate
+    const mid = [bx + dir[0] * h * 0.5 - px * bw * 1.1, by + dir[1] * h * 0.5 - py * bw * 1.1];
+    for (let y = 0; y < HC; y++) for (let x = 0; x < WC; x++) {
+      const cx = x + .5, cy = y + .5 - OY;
+      if ((inTri(cx, cy, a, b, tip) || (h >= 7 && inTri(cx, cy, b, mid, [bx + dir[0]*h*0.25, by + dir[1]*h*0.25]))) && g[y][x] === '.') { g[y][x] = 'p'; id[y][x] = i + 1; }
+    }
+  });
+  // small spikes along the outside of the tail
+  for (const [tx, ty, r, t] of tail) {
+    if (t < 0.5 || t > 0.93 || Math.round(t * 50) % 8) continue;
+    const sx = Math.round(tx - r - 1), sy = Math.round(ty) + OY;
+    for (let k = 0; k < 2; k++) if (g[sy] && g[sy][sx - k] === '.') { g[sy][sx - k] = 'p'; id[sy][sx - k] = 99; }
+  }
+
+  // shading
+  const empty = (x, y) => !g[y] || g[y][x] === undefined || g[y][x] === '.';
+  const out = g.map(r => r.slice());
+  for (let y = 0; y < HC; y++) for (let x = 0; x < WC; x++) {
+    const c = g[y][x];
+    if (c === 'p') {
+      const n = [[1,0],[-1,0],[0,1],[0,-1]].some(([dx, dy]) => { const yy = y + dy, xx = x + dx; return empty(xx, yy) ? dx <= 0 || dy > 0 : (g[yy][xx] === 'p' && id[yy][xx] !== id[y][x]); });
+      out[y][x] = n ? 'd' : 'p';
+      continue;
+    }
+    if (c !== '#') continue;
+    const my = y + .5 - OY;
+    const bel = Math.min(inE(x + .5, my, 40.5, 26, 4.8, 7.5), inE(x + .5, my, 45.5, 15.5, 2.8, 4));
+    const shadowEdge = empty(x - 1, y + 1) || empty(x, y + 1) || empty(x - 1, y);
+    const thighEdge = (() => { const v = inE(x + .5, my, 41, 31, 7, 6.5); return v > 0.7 && v <= 1 && x < 40 && my > 26; })();
+    const rearThighEdge = (() => { const v = inE(x + .5, my, 27, 31, 7.5, 6.5); return v > 0.72 && v <= 1 && x > 28 && my > 27; })();
+    if (shadowEdge || thighEdge || rearThighEdge) out[y][x] = 'd';
+    else if (bel < 0.75) out[y][x] = (Math.floor(my) % 4 === 0) ? '#' : 'l';   // segmented belly
+    else if (bel < 1 && (x + y) % 2 === 0) out[y][x] = 'l';
+  }
+  // face details
+  const set = (x, y, ch) => { y += OY; if (out[y] && out[y][x] !== undefined && out[y][x] !== '.') out[y][x] = ch; };
+  set(52, 5, 'e'); set(51, 4, 'd'); set(52, 4, 'd'); set(53, 4, 'd');
+  if (pose.dead) { set(51, 5, 'e'); set(53, 5, 'e'); set(52, 6, 'e'); }
+  if (pose.mouth === 'open') { for (let x = 51; x <= 57; x++) for (let y = 9; y <= 10; y++) out[y + OY][x] = '.'; set(53, 8, 'w'); set(55, 8, 'w'); set(52, 11, 'w'); set(54, 11, 'w'); }
+  else { for (let x = 52; x <= 56; x++) set(x, 9, 'd'); set(55, 9, 'w'); set(53, 9, 'w'); }
+  // claws
+  [[rearAnk[0] + 4, 41], [rearAnk[0] + 2, 41], [frontAnk[0] + 4, 41], [frontAnk[0] + 2, 41]].forEach(([x, y]) => set(x, y, 'w'));
+  if (!pose.punch) { set(53, 21, 'w'); set(52, 22, 'w'); }
+  return out.map(r => r.join(''));
+}
+
+const cvs = document.getElementById('game');
+const ctx = cvs.getContext('2d');
+
+// ---------- constants ----------
+const W = 800, H = 240, GY = 222, GPX = 2, GX = 6;
+const START_SPEED = 380, MAX_SPEED = 900, ACCEL = 7;
+const PUNCH_ACTIVE = 0.16, PUNCH_HIT_CD = 0.15, PUNCH_WHIFF_CD = 0.32, PUNCH_BUFFER = 0.10;
+const CHARGE_NEED = 5;                 // buildings to smash for one atomic breath
+const BREATH_WIND = 0.15, BREATH_BEAM = 0.55, BEAM_LEN = 760;
+const FONT = "'Press Start 2P','Courier New',monospace";
+const WATER_DEPTH = 30, HORIZON = GY - 62;   // sea: water covers Godzilla's lower third
+const CITY_LEN = 700, SEA_LEN = 500;         // points spent in each zone
+
+function resize() {
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  cvs.width = W * dpr; cvs.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ---------- colors / day-night ----------
+const DAY = { bg:[247,247,247], fg:[83,83,83] };
+const NIGHT = { bg:[30,31,36], fg:[200,200,200] };
+const mix = (a,b,t) => a.map((v,i) => Math.round(v + (b[i]-v)*t));
+const rgb = a => `rgb(${a[0]},${a[1]},${a[2]})`;
+const C = { glow:'#4fc3ff', soft:'#a5e0ff', core:'#ffffff' };
+let night = 0, lastNightApplied = -1;
+function updColors() {
+  const bg = mix(DAY.bg, NIGHT.bg, night), fg = mix(DAY.fg, NIGHT.fg, night);
+  const ink = mix([25,25,25], [245,245,245], night);
+  C.bg = rgb(bg); C.fg = rgb(fg);
+  C.far = rgb(mix(bg, fg, 0.12)); C.mid = rgb(mix(bg, fg, 0.35));
+  C.dark = rgb(mix(fg, ink, 0.45)); C.light = rgb(mix(bg, fg, 0.66));
+  C.plate = rgb(mix(bg, fg, 0.5)); C.claw = rgb(mix(bg, fg, 0.15));
+  C.water = rgb(mix(bg, fg, 0.2)); C.ripple = rgb(mix(bg, fg, 0.32)); C.spray = rgb(mix(bg, fg, 0.42)); C.farSea = rgb(mix(bg, fg, 0.06));
+  if (Math.abs(night - lastNightApplied) > 0.01) {
+    document.documentElement.style.setProperty('--bg', C.bg);
+    document.documentElement.style.setProperty('--fg', C.fg);
+    lastNightApplied = night;
+  }
+}
+
+// ---------- helpers ----------
+const rnd = (a,b) => a + Math.random()*(b-a);
+const pick = arr => arr[(Math.random()*arr.length)|0];
+const R = (x,y,w,h) => ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
+const pad = n => String(Math.min(99999, n)).padStart(5, '0');
+const norm = (x,y) => { const l = Math.hypot(x,y) || 1; return { x: x/l, y: y/l }; };
+
+// ---------- sprites ----------
+const SPR = {
+  RUN_A: buildGodzilla({ leg: 0 }), RUN_B: buildGodzilla({ leg: 1 }),
+  PUNCH_A: buildGodzilla({ leg: 0, punch: true }), PUNCH_B: buildGodzilla({ leg: 1, punch: true }),
+  BREATH: buildGodzilla({ leg: 0, mouth: 'open' }), DEAD: buildGodzilla({ leg: 0, mouth: 'open', dead: true }),
+};
+const SROWS = SPR.RUN_A.length;
+const maxCol = (rows, fromRow) => { let m = 0; rows.forEach((r, i) => { if (i >= fromRow) for (let c = r.length - 1; c >= 0; c--) if (r[c] !== '.') { m = Math.max(m, c); break; } }); return m; };
+const FRONT_COL = maxCol(SPR.RUN_A, 26);            // belly / feet
+const FIST_COL = maxCol(SPR.PUNCH_A, 0);
+const GZ_TOP = GY - SROWS * GPX;
+const FRONT_X = GX + (FRONT_COL + 1) * GPX;
+const REACH_X = GX + (FIST_COL + 1) * GPX + 14;
+const MOUTH = { x: GX + 57 * GPX, y: GZ_TOP + 15.5 * GPX };
+const CHEST = { x: GX + 44 * GPX, y: GZ_TOP + 24 * GPX };
+
+function drawSprite(rows, x, y, plateColor) {
+  for (let r = 0; r < rows.length; r++) {
+    const row = rows[r];
+    for (let c = 0; c < row.length; c++) {
+      const ch = row[c];
+      if (ch === '.') continue;
+      let col;
+      switch (ch) {
+        case 'd': col = C.dark; break;
+        case 'l': col = C.light; break;
+        case 'p': col = (plateColor && plateColor(c)) || C.plate; break;
+        case 'e': col = C.bg; break;
+        case 'w': col = C.claw; break;
+        default:  col = C.fg;
+      }
+      ctx.fillStyle = col;
+      ctx.fillRect(x + c*GPX, y + r*GPX, GPX, GPX);
+    }
+  }
+}
+
+// ---------- audio ----------
+let AC = null, NB = null, muted = false;
+function ac() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { AC = null; } }
+  return AC;
+}
+function snd(fn) {
+  if (muted) return;
+  const a = ac(); if (!a) return;
+  if (a.state === 'suspended') a.resume();
+  try { fn(a); } catch (e) {}
+}
+function tone(a, { f=440, f2=f, d=.1, type='square', v=.05, delay=0 }) {
+  const o = a.createOscillator(), g = a.createGain(), t0 = a.currentTime + delay;
+  o.type = type;
+  o.frequency.setValueAtTime(f, t0);
+  o.frequency.exponentialRampToValueAtTime(Math.max(1, f2), t0 + d);
+  g.gain.setValueAtTime(v, t0);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + d);
+  o.connect(g).connect(a.destination);
+  o.start(t0); o.stop(t0 + d + 0.02);
+}
+function noise(a, { d=.2, v=.1, freq=800, type='lowpass', delay=0 }) {
+  if (!NB) {
+    NB = a.createBuffer(1, a.sampleRate, a.sampleRate);
+    const ch = NB.getChannelData(0);
+    for (let i = 0; i < ch.length; i++) ch[i] = Math.random()*2 - 1;
+  }
+  const s = a.createBufferSource(); s.buffer = NB;
+  const fl = a.createBiquadFilter(); fl.type = type; fl.frequency.value = freq;
+  const g = a.createGain(), t0 = a.currentTime + delay;
+  g.gain.setValueAtTime(v, t0);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + d);
+  s.connect(fl).connect(g).connect(a.destination);
+  s.start(t0); s.stop(t0 + d);
+}
+const SFX = {
+  punch:  () => snd(a => { tone(a,{f:110,f2:45,d:.12,v:.08}); noise(a,{d:.08,v:.12,freq:500}); }),
+  whiff:  () => snd(a => { noise(a,{d:.12,v:.06,freq:1800,type:'bandpass'}); }),
+  smash:  () => snd(a => { noise(a,{d:.4,v:.16,freq:700,delay:.02}); tone(a,{f:70,f2:35,d:.25,type:'triangle',v:.12}); }),
+  charge: n => snd(a => { tone(a,{f:440 * Math.pow(1.26, n),d:.08,v:.03}); }),
+  full:   () => snd(a => { tone(a,{f:660,d:.07,v:.035}); tone(a,{f:990,d:.07,v:.035,delay:.07}); tone(a,{f:1320,d:.12,v:.035,delay:.14}); }),
+  windup: () => snd(a => { tone(a,{f:200,f2:1400,d:.15,type:'square',v:.03}); }),
+  breath: () => snd(a => { tone(a,{f:1000,f2:200,d:.55,type:'sawtooth',v:.04}); noise(a,{d:.55,v:.09,freq:2200,type:'highpass'}); tone(a,{f:60,f2:40,d:.5,type:'triangle',v:.1}); }),
+  hit:    () => snd(a => { tone(a,{f:600,f2:150,d:.15,v:.05}); noise(a,{d:.2,v:.1,freq:1500}); }),
+  boom:   () => snd(a => { noise(a,{d:.6,v:.2,freq:450}); tone(a,{f:90,f2:30,d:.4,type:'triangle',v:.12}); }),
+  gun:    () => snd(a => { noise(a,{d:.04,v:.04,freq:3000,type:'highpass'}); }),
+  warn:   () => snd(a => { tone(a,{f:880,d:.06,v:.03}); }),
+  beep:   () => snd(a => { tone(a,{f:520,d:.07,v:.04}); tone(a,{f:780,d:.09,v:.04,delay:.08}); }),
+  die:    () => snd(a => { tone(a,{f:320,f2:50,d:.5,v:.06}); noise(a,{d:.3,v:.1,freq:600}); }),
+  roar:   () => snd(a => { tone(a,{f:170,f2:80,d:.7,type:'sawtooth',v:.05}); tone(a,{f:230,f2:95,d:.7,type:'sawtooth',v:.03}); noise(a,{d:.6,v:.06,freq:900}); }),
+  fizzle: () => snd(a => { tone(a,{f:140,f2:90,d:.1,v:.03}); }),
+};
+
+// ---------- background ----------
+const SKY_LEN = 1600;
+const skyline = [];
+for (let x = 0; x < SKY_LEN; ) {
+  const w = rnd(18, 46), h = rnd(18, 70);
+  skyline.push({ x, w, h, ant: Math.random() < .25 ? rnd(6, 14) : 0 });
+  x += w + (Math.random() < .3 ? rnd(4, 20) : 0);
+}
+const GROUND_LEN = 1200;
+const groundBits = [];
+for (let i = 0; i < 90; i++) groundBits.push({ x: rnd(0, GROUND_LEN), y: rnd(3, 14), w: pick([1,2,3,3,4,6]) });
+const groundBumps = [];
+for (let i = 0; i < 14; i++) groundBumps.push({ x: rnd(0, GROUND_LEN), w: rnd(6, 14) });
+const farFleet = [];                 // distant islands and ships on the horizon
+for (let x = 0; x < SKY_LEN; x += rnd(90, 220)) farFleet.push({ x, kind: pick(['island','island','ship','carrier']), w: rnd(30, 90) });
+const ripples = [];
+for (let i = 0; i < 60; i++) ripples.push({ x: rnd(0, GROUND_LEN), y: rnd(5, 26), w: pick([3,4,6,8]) });
+const clouds = [];
+for (let i = 0; i < 4; i++) clouds.push({ x: rnd(0, 1100), y: rnd(30, 90) });
+
+// ---------- state ----------
+let st = 'start', t = 0, speed, dist, bonus, objs, parts, pops, spawnGap, gz;
+let nextHeliT = 0, shake = 0, milestoneT = 0, lastMilestone = 0, overT = 0, deathCause = '';
+let zone = 'city', sea = 0, zoneNext = CITY_LEN, banner = null;
+let hi = 0;
+try { hi = parseInt(localStorage.getItem('godzillaRunHi') || '0', 10) || 0; } catch (e) {}
+const showHints = () => hi < 1000;
+
+function reset() {
+  speed = START_SPEED; dist = 0; bonus = 0;
+  objs = []; parts = []; pops = [];
+  spawnGap = 520; nextHeliT = t + rnd(4, 6);
+  gz = { punchT: -1, punchHit: false, punchReadyAt: 0, buf: -9, whiffed: false,
+         charge: 0, fullFlash: 0, breathT: -1, target: null, legT: 0, leg: 0, hitFlash: 0 };
+  lastMilestone = 0; milestoneT = 0;
+  zone = 'city'; sea = 0; zoneNext = CITY_LEN; banner = null;
+}
+reset();
+const score = () => Math.floor(dist * 0.025) + bonus;
+const breathing = () => gz.breathT >= 0;
+const beamOn = () => gz.breathT >= BREATH_WIND;
+const charged = () => gz.charge >= CHARGE_NEED;
+const waterY = () => GY - WATER_DEPTH * sea;
+const floorY = () => sea > 0.5 ? waterY() : GY;
+const heliTimer = () => Math.max(3.8, 5 - score() / 2500);   // seconds a chopper gives you
+
+// ---------- obstacles ----------
+function makeBuilding(x) {
+  const style = pick(['shop', 'office', 'office', 'tower']);
+  let w, h;
+  if (style === 'shop')        { w = rnd(30, 46); h = rnd(32, 48); }
+  else if (style === 'office') { w = rnd(38, 56); h = rnd(56, 86); }
+  else                         { w = rnd(26, 34); h = rnd(92, 126); }
+  w = Math.round(w); h = Math.round(h);
+  const wins = [], sx = style === 'tower' ? 6 : 8;
+  for (let yy = 7; yy < h - (style === 'shop' ? 16 : 8); yy += 10)
+    for (let xx = 5; xx < w - 6; xx += sx)
+      if (Math.random() < 0.82) wins.push([xx, yy]);
+  return { k:'bld', x, w, h, style, wins, alive: true, ct: 0, rubble: [],
+    ant: style === 'tower' ? Math.round(rnd(8, 18)) : 0, tank: style === 'office' && Math.random() < .5 };
+}
+function makeShip(x, style) {
+  style = style || pick(['patrol', 'patrol', 'destroyer', 'destroyer', 'sub', 'carrier']);
+  let w, h;
+  if (style === 'patrol')         { w = rnd(40, 54); h = 18; }
+  else if (style === 'destroyer') { w = rnd(72, 92); h = 30; }
+  else if (style === 'sub')       { w = rnd(60, 78); h = 20; }
+  else                            { w = rnd(130, 160); h = 34; }
+  return { k:'bld', ship: true, style, x, w: Math.round(w), h, alive: true, ct: 0, rubble: [], tilt: Math.random() < .5 ? 1 : -1 };
+}
+function spawn() {
+  const s = score();
+  if (s >= 150 && Math.random() < 0.3) {
+    // back-to-back buildings: the next one shows up just after your punch recovers
+    const n = s > 700 && Math.random() < .4 ? 3 : 2;
+    let off = 0;
+    for (let i = 0; i < n; i++) {
+      const b = zone === 'sea' ? makeShip(W + 10 + off, pick(['patrol', 'sub'])) : makeBuilding(W + 10 + off);
+      objs.push(b);
+      off += Math.max(b.w + 16, speed * (PUNCH_HIT_CD + rnd(0.16, 0.34)));
+    }
+    spawnGap = off + speed * rnd(0.5, 1.0) + 60;
+  } else {
+    const b = zone === 'sea' ? makeShip(W + 10) : makeBuilding(W + 10);
+    objs.push(b);
+    spawnGap = b.w + speed * rnd(0.5, 1.1) + 70;
+  }
+}
+function spawnHeli() {
+  const jet = zone === 'sea';
+  objs.push({ k:'heli', jet, x: W + (jet ? 60 : 20), y: rnd(40, 115), w: jet ? 52 : 44, alive: true, fall: false, ph: 0,
+    hoverX: rnd(440, 620), hoverY: 0, mode: 'in', timer: heliTimer(), max: heliTimer(),
+    gunT: 0.6, warnT: 0, fr: 0, ft: 0, rot: 0, rotV: 0, vy: 0, bob: rnd(0, 6), smokeT: 0 });
+  const o = objs[objs.length - 1]; o.hoverY = o.y;
+}
+const heliBox = h => h.jet ? [h.x + 2, h.y + 2, 48, 12] : [h.x + 4, h.y + 4, 40, 16];
+const heliCtr = h => h.jet ? { x: h.x + 26, y: h.y + 8 } : { x: h.x + 22, y: h.y + 12 };
+const bldBase = b => b.ship ? waterY() : GY;
+const bldBox = b => [b.x, bldBase(b) - b.h, b.w, b.h];
+const liveHeli = () => objs.find(o => o.k === 'heli' && o.alive && !o.fall);
+
+// ---------- beam ----------
+function aimWanted() {
+  const tg = gz.target && gz.target.alive && !gz.target.fall ? gz.target : null;
+  if (tg) { const c = heliCtr(tg); return norm(c.x - MOUTH.x, c.y - MOUTH.y); }
+  return norm(1, 0.17);        // no chopper (or it's down): rake the street
+}
+const beamDir = () => gz.aim || aimWanted();
+const beamHalf = d => 11 + Math.min(d * 0.02, 8);
+const beamLen = () => Math.min(BEAM_LEN, (gz.breathT - BREATH_WIND) * 3200);
+function beamHits(box) {
+  const dir = beamDir(), len = beamLen();
+  for (let d = 0; d <= len; d += 6) {
+    const x = MOUTH.x + dir.x * d, y = MOUTH.y + dir.y * d, h = beamHalf(d);
+    if (y > GY + 4) break;
+    if (x + h > box[0] && x - h < box[0] + box[2] && y + h > box[1] && y - h < box[1] + box[3]) return true;
+  }
+  return false;
+}
+
+// ---------- events ----------
+function addParts(n, x, y, o) {
+  for (let i = 0; i < n; i++) parts.push({
+    x: x + rnd(-(o.spreadX||0), o.spreadX||0), y: y + rnd(-(o.spreadY||0), o.spreadY||0),
+    vx: rnd(o.vx[0], o.vx[1]), vy: rnd(o.vy[0], o.vy[1]),
+    s: pick(o.sizes || [2,4]), life: rnd(o.life[0], o.life[1]), max: o.life[1],
+    g: o.g ?? 900, c: o.c || 'fg', grow: o.grow || 0,
+  });
+}
+function smash(b, byBeam) {
+  b.alive = false; b.ct = 0;
+  for (let x = 0; x < b.w; x += 3) b.rubble.push(Math.round(rnd(2, 9)));
+  const base = bldBase(b);
+  if (b.ship) addParts(Math.round(b.w / 5) + 8, b.x + b.w/2, base - 2, { spreadX: b.w/2, vx: [speed*0.6, speed + 200], vy: [-380, -120], life: [.5, 1], c: 'spray', sizes: [2,4] });
+  addParts(Math.round(b.h / 4) + 8, b.x + b.w/2, base - b.h/2,
+    { spreadX: b.w/2, spreadY: b.h/2, vx: [speed*0.5, speed + 320], vy: [-340, -60], life: [.6, 1.3], sizes: [2,2,4,4,6],
+      c: byBeam ? pick(['glow','fg']) : 'fg' });
+  addParts(10, b.x + 4, base - 20, { spreadY: 14, vx: [speed*0.3, speed], vy: [-60, -10], life: [.5,.9], g: -40, c:'mid', sizes: [4,6], grow: 10 });
+  bonus += 10;
+  pops.push({ x: b.x + b.w/2, y: base - b.h - 10, txt: '+10', life: .8 });
+  shake = Math.max(shake, .14);
+  SFX.smash();
+  if (!byBeam && gz.charge < CHARGE_NEED) {
+    gz.charge++;
+    if (gz.charge === CHARGE_NEED) { gz.fullFlash = 0.6; SFX.full(); } else SFX.charge(gz.charge);
+  }
+}
+function downHeli(h) {
+  h.fall = true; h.vy = -90; h.rotV = rnd(5, 9) * (Math.random() < .5 ? -1 : 1);
+  const hc = heliCtr(h);
+  addParts(18, hc.x, hc.y, { spreadX: 10, spreadY: 6, vx: [speed*0.6, speed + 200], vy: [-260, 80], life: [.3, .7], g: 300, c:'glow', sizes: [2,4] });
+  bonus += 50;
+  pops.push({ x: hc.x, y: h.y - 6, txt: '+50', life: 1 });
+  nextHeliT = t + Math.max(1.5, rnd(3, 5.5) - score() / 2000);
+  SFX.hit();
+}
+function crashHeli(h) {
+  h.alive = false;
+  if (sea > 0.5) {   // splashes into the sea
+    const wy = waterY(), cx = heliCtr(h).x;
+    addParts(30, cx, wy, { spreadX: 10, vx: [speed*0.7, speed*1.15], vy: [-480, -140], life: [.6, 1.1], c: 'spray', sizes: [2,4,4] });
+    addParts(8, cx, wy - 6, { spreadX: 8, vx: [speed*0.7, speed*1.2], vy: [-200, -40], life: [.2, .45], g: 0, c:'glow', sizes: [4] });
+    shake = Math.max(shake, .2); SFX.boom(); return;
+  }
+  addParts(22, h.x + 22, GY - 8, { spreadX: 14, vx: [speed*0.4, speed + 220], vy: [-360, -80], life: [.5, 1.1], sizes: [2,4,4,6] });
+  addParts(10, h.x + 22, GY - 12, { spreadX: 12, vx: [speed*0.6, speed*1.1], vy: [-90, -20], life: [.6, 1.0], g: -50, c:'mid', sizes: [6,8], grow: 12 });
+  addParts(8, h.x + 22, GY - 10, { spreadX: 8, vx: [speed*0.7, speed*1.2], vy: [-200, -40], life: [.2, .45], g: 0, c:'glow', sizes: [4] });
+  shake = Math.max(shake, .2);
+  SFX.boom();
+}
+function die(cause) {
+  st = 'over'; overT = t; shake = .25; deathCause = cause;
+  if (cause === 'chopper' || cause === 'jet') addParts(20, CHEST.x, CHEST.y, { spreadX: 10, spreadY: 10, vx: [-150, 150], vy: [-250, 0], life: [.4, .8], g: 400, sizes: [2,4] });
+  const s = score();
+  if (s > hi) { hi = s; try { localStorage.setItem('godzillaRunHi', String(hi)); } catch (e) {} }
+  SFX.die();
+}
+const TIPS = {
+  bld:      'TIP: PUNCH (SPACE) AS THE BUILDING REACHES YOU',
+  bldEarly: 'TIP: TOO EARLY - A MISSED PUNCH IS SLOW TO RECOVER',
+  chopper:  'TIP: SMASH 5 BUILDINGS TO CHARGE, THEN UP TO BLAST CHOPPERS',
+  jet:      'TIP: SMASH 5 SHIPS TO CHARGE, THEN UP TO BLAST JETS',
+};
+function startOrRestart() {
+  if (st === 'start' || (st === 'over' && t - overT > 0.5)) { reset(); st = 'playing'; SFX.roar(); }
+}
+function doPunch() {
+  if (st !== 'playing') { startOrRestart(); return; }
+  gz.buf = t;
+}
+function tryStartPunch() {
+  if (t - gz.buf > PUNCH_BUFFER) return;
+  if (breathing() || t < gz.punchReadyAt) return;
+  gz.punchT = 0; gz.punchHit = false; gz.whiffed = false; gz.buf = -9;
+  gz.punchReadyAt = t + PUNCH_WHIFF_CD;          // shortened if the punch connects
+  SFX.punch();
+}
+function doBreath() {
+  if (st !== 'playing') { startOrRestart(); return; }
+  if (!charged() || breathing()) { SFX.fizzle(); gz.denyT = 0.4; return; }
+  gz.breathT = 0; gz.charge = 0; gz.punchT = -1; gz.target = liveHeli() || null; gz.aim = null;
+  SFX.windup();
+}
+
+// ---------- update ----------
+function update(dt) {
+  t += dt;
+  shake = Math.max(0, shake - dt);
+  milestoneT = Math.max(0, milestoneT - dt);
+  const seaTarget = zone === 'sea' ? 1 : 0;
+  sea += Math.sign(seaTarget - sea) * Math.min(Math.abs(seaTarget - sea), dt * 0.7);
+  if (banner) { banner.life -= dt; if (banner.life <= 0) banner = null; }
+  if (st !== 'playing') return;
+
+  speed = Math.min(MAX_SPEED, speed + ACCEL * dt);
+  dist += speed * dt;
+  const s = score();
+  const ms = Math.floor(s / 100);
+  if (ms > lastMilestone) { lastMilestone = ms; milestoneT = .9; SFX.beep(); }
+  if (s >= zoneNext) {
+    zone = zone === 'city' ? 'sea' : 'city';
+    zoneNext += zone === 'sea' ? SEA_LEN : CITY_LEN;
+    spawnGap = Math.max(spawnGap, speed * 1.6);          // clear stretch while the scenery changes
+    banner = { txt: zone === 'sea' ? 'TO THE SEA!' : 'BACK TO THE CITY!', life: 2.2 };
+    SFX.roar();
+  }
+  if (sea > 0.5) {   // wake around his legs
+    gz.wakeT = (gz.wakeT || 0) - dt;
+    if (gz.wakeT <= 0) { gz.wakeT = 0.03; parts.push({ x: GX + rnd(30, 96), y: waterY() - 1, vx: speed * rnd(0.1, 0.5), vy: rnd(-150, -50), s: 2, life: .5, max: .5, g: 700, c: 'spray', grow: 0 }); }
+  }
+
+  // godzilla
+  tryStartPunch();
+  if (gz.punchT >= 0) {
+    gz.punchT += dt;
+    if (gz.punchT >= PUNCH_ACTIVE && !gz.punchHit && !gz.whiffed) { gz.whiffed = true; SFX.whiff(); }
+    if (gz.punchT > 0.3) gz.punchT = -1;
+  }
+  if (gz.breathT >= 0) {
+    const before = gz.breathT;
+    gz.breathT += dt;
+    if (before < BREATH_WIND && gz.breathT >= BREATH_WIND) { SFX.breath(); shake = Math.max(shake, .12); }
+    if (beamOn()) shake = Math.max(shake, .05);
+    const want = aimWanted();          // sweep smoothly instead of snapping
+    if (!gz.aim) gz.aim = want;
+    else { const k = Math.min(1, dt * 9); gz.aim = norm(gz.aim.x + (want.x - gz.aim.x) * k, gz.aim.y + (want.y - gz.aim.y) * k); }
+    if (gz.breathT > BREATH_WIND + BREATH_BEAM) gz.breathT = -1;
+  }
+  gz.fullFlash = Math.max(0, gz.fullFlash - dt);
+  gz.hitFlash = Math.max(0, gz.hitFlash - dt);
+  gz.denyT = Math.max(0, (gz.denyT || 0) - dt);
+  gz.legT += dt * speed / START_SPEED;
+  if (gz.legT > 0.11) { gz.legT = 0; gz.leg ^= 1; }
+
+  spawnGap -= speed * dt;
+  if (spawnGap <= 0) spawn();
+  if (s >= 60 && t >= nextHeliT && !objs.some(o => o.k === 'heli')) spawnHeli();
+
+  const punching = gz.punchT >= 0 && gz.punchT < PUNCH_ACTIVE;
+  for (const o of objs) {
+    if (o.k === 'bld') {
+      o.x -= speed * dt;
+      if (!o.alive) { o.ct += dt; continue; }
+      if ((beamOn() && beamHits(bldBox(o))) || (breathing() && o.x < REACH_X)) { smash(o, true); continue; }   // the blast vaporizes what it touches
+      if (punching && o.x < REACH_X && o.x + o.w > GX) {
+        smash(o, false); gz.punchHit = true; gz.punchReadyAt = t - gz.punchT + PUNCH_HIT_CD;
+      } else if (o.x < FRONT_X - 2 && o.x + o.w > GX + 30) {
+        die((gz.punchT >= 0 && !gz.punchHit) || t < gz.punchReadyAt ? 'bldEarly' : 'bld');
+        return;
+      }
+    } else if (o.k === 'bullet') {
+      o.x += o.vx * dt; o.y += o.vy * dt; o.life -= dt;
+      if (o.life <= 0) {
+        o.alive = false; gz.hitFlash = 0.08;
+        addParts(3, o.x, o.y, { vx: [speed - 120, speed + 80], vy: [-120, 40], life: [.15, .3], g: 300, c: 'mid', sizes: [2] });
+      }
+    } else if (o.k === 'heli') {
+      if (!o.alive) continue;
+      if (o.fall) {
+        o.x -= (speed * 0.6) * dt;
+        o.vy += 650 * dt; o.y += o.vy * dt; o.rot += o.rotV * dt;
+        o.smokeT -= dt;
+        if (o.smokeT <= 0) {
+          o.smokeT = .035;
+          parts.push({ x: heliCtr(o).x, y: o.y + 10, vx: rnd(speed*0.7, speed*0.95), vy: rnd(-40, -10), s: 4, life: .6, max: .6, g: -30, c: 'mid', grow: 10 });
+        }
+        if (o.y + 18 >= floorY()) crashHeli(o);
+        continue;
+      }
+      o.ft += dt; if (o.ft > 0.05) { o.ft = 0; o.fr ^= 1; }
+      if (o.mode === 'in') {
+        o.x -= (o.jet ? 760 : 340) * dt;
+        if (o.x <= o.hoverX) o.mode = 'hover';
+      } else {
+        if (o.jet) { o.ph += dt; o.x = o.hoverX + Math.sin(o.ph * 1.8) * 50; }   // jets weave in a figure-eight
+        // hover in front of Godzilla and shoot until he's down
+        o.timer -= dt;
+        o.gunT -= dt;
+        if (o.gunT <= 0) {
+          o.gunT = Math.max(0.18, 0.55 * (o.timer / o.max) + 0.12);
+          const tx = CHEST.x + rnd(-14, 14), ty = CHEST.y + rnd(-26, 16);
+          const sx = o.x + 4, sy = o.y + (o.jet ? 9 : 16), d = Math.hypot(tx - sx, ty - sy);
+          objs.push({ k: 'bullet', x: sx, y: sy, vx: (tx - sx) / d * 900, vy: (ty - sy) / d * 900, life: d / 900, alive: true, w: 2 });
+          SFX.gun();
+        }
+        if (o.timer < 1.5) { o.warnT -= dt; if (o.warnT <= 0) { o.warnT = 0.25; SFX.warn(); } }
+        if (o.timer <= 0) { die(o.jet ? 'jet' : 'chopper'); return; }
+      }
+      o.y = o.jet ? o.hoverY + (o.mode === 'hover' ? Math.sin(o.ph * 3.6) * 14 : 0) : o.hoverY + Math.sin(t * 5 + o.bob) * 3;
+      if (beamOn() && beamHits(heliBox(o))) downHeli(o);
+    }
+  }
+  objs = objs.filter(o => o.alive ? o.x + o.w > -80 : (o.k === 'bld' && o.x + o.w > -80));
+
+  for (const p of parts) {
+    p.x += (p.vx - speed) * dt;
+    p.vy += p.g * dt; p.y += p.vy * dt;
+    p.s += p.grow * dt;
+    if (p.g > 0 && p.vy > 0 && sea > 0.5 && p.y > waterY()) p.life = 0;
+    else if (p.g > 0 && p.y > GY - p.s) { p.y = GY - p.s; p.vy *= -0.3; p.vx = p.vx * 0.4 + speed * 0.6; }
+    p.life -= dt;
+  }
+  parts = parts.filter(p => p.life > 0 && p.x > -20);
+  for (const p of pops) { p.life -= dt; p.y -= 30 * dt; p.x -= speed * dt * 0.3; }
+  pops = pops.filter(p => p.life > 0);
+}
+
+// ---------- draw ----------
+function drawBackground() {
+  ctx.fillStyle = C.bg; ctx.fillRect(-20, -20, W + 40, H + 40);
+  ctx.fillStyle = C.far;
+  for (const c of clouds) {
+    const x = ((c.x - dist * 0.08) % 1100 + 1100) % 1100 - 100;
+    R(x + 8, c.y, 30, 4); R(x, c.y + 4, 46, 4); R(x + 14, c.y - 4, 14, 4);
+  }
+  const off = (dist * 0.12) % SKY_LEN;
+  if (sea < 1) {
+    ctx.globalAlpha = 1 - sea;
+    for (let k = 0; k < 2; k++) for (const b of skyline) {
+      const x = b.x - off + k * SKY_LEN;
+      if (x > W || x + b.w < 0) continue;
+      R(x, GY - b.h, b.w, b.h);
+      if (b.ant) R(x + b.w/2 - 1, GY - b.h - b.ant, 2, b.ant);
+    }
+    ctx.globalAlpha = 1;
+  }
+  if (sea > 0) {
+    ctx.globalAlpha = sea;
+    ctx.fillStyle = C.farSea; R(0, HORIZON, W, GY - HORIZON);
+    ctx.fillStyle = C.far; R(0, HORIZON, W, 1);
+    for (let k = 0; k < 2; k++) for (const f of farFleet) {
+      const x = f.x - off + k * SKY_LEN;
+      if (x > W || x + f.w < 0) continue;
+      if (f.kind === 'island') { R(x, HORIZON - 6, f.w, 6); R(x + f.w * .2, HORIZON - 11, f.w * .45, 5); R(x + f.w * .3, HORIZON - 14, f.w * .2, 3); }
+      else if (f.kind === 'ship') { R(x, HORIZON - 3, 26, 3); R(x + 8, HORIZON - 7, 9, 4); R(x + 12, HORIZON - 11, 1, 4); }
+      else { R(x - 2, HORIZON - 4, 46, 2); R(x, HORIZON - 2, 42, 2); R(x + 30, HORIZON - 10, 6, 6); }
+    }
+    ctx.globalAlpha = 1;
+  }
+  ctx.fillStyle = C.fg;
+  R(0, GY - 1, W, 1);
+  const go = dist % GROUND_LEN;
+  for (let k = 0; k < 2; k++) {
+    for (const g of groundBits) { const x = g.x - go + k * GROUND_LEN; if (x > -10 && x < W) R(x, GY + g.y, g.w, 1); }
+    for (const g of groundBumps) { const x = g.x - go + k * GROUND_LEN; if (x > -20 && x < W) { R(x, GY - 2, g.w, 1); R(x + 2, GY - 3, g.w - 4, 1); } }
+  }
+}
+
+function drawShip(b) {
+  const x = b.x, w = b.w;
+  let s = waterY();
+  if (!b.alive) s += Math.min(1, b.ct / 0.7) * (b.h + 12);    // sinks
+  ctx.fillStyle = C.fg;
+  if (b.style === 'patrol') {
+    R(x + 6, s - 8, w - 6, 4); R(x + 2, s - 4, w - 2, 10);
+    R(x + w * .4, s - 15, w * .34, 7); R(x + w * .56, s - 22, 2, 7); R(x + 6, s - 11, 7, 3);
+    ctx.fillStyle = C.bg; R(x + w * .44, s - 13, 3, 3); R(x + w * .54, s - 13, 3, 3); R(x + w * .64, s - 13, 3, 3);
+  } else if (b.style === 'destroyer') {
+    R(x + 8, s - 10, w - 8, 4); R(x + 3, s - 6, w - 3, 12);
+    R(x + w * .34, s - 19, w * .32, 9); R(x + w * .42, s - 27, w * .14, 8); R(x + w * .48, s - 38, 2, 11); R(x + w * .44, s - 34, 10, 2);
+    R(x + 14, s - 14, 10, 4); R(x + 4, s - 13, 10, 2);                         // fore turret
+    R(x + w - 22, s - 14, 10, 4); R(x + w - 12, s - 13, 8, 2);                  // aft turret
+    ctx.fillStyle = C.dark; R(x + w * .7, s - 22, 7, 12);                       // funnel
+    ctx.fillStyle = C.bg; R(x + w * .44, s - 24, 3, 2); R(x + w * .5, s - 24, 3, 2);
+  } else if (b.style === 'sub') {
+    R(x + 6, s - 6, w - 12, 6); R(x + 2, s - 3, w - 2, 8); R(x + w - 8, s - 9, 3, 6);
+    R(x + w * .32, s - 17, 13, 11); R(x + w * .32 + 3, s - 20, 8, 3); R(x + w * .32 + 9, s - 26, 2, 6);
+    R(x + w * .32 - 3, s - 13, 3, 2); R(x + w * .32 + 13, s - 13, 3, 2);       // dive planes
+  } else {   // aircraft carrier
+    R(x - 4, s - 18, w + 4, 4); R(x + 4, s - 14, w - 4, 20);
+    R(x + w * .66, s - 34, 16, 16); R(x + w * .66 + 7, s - 44, 2, 10); R(x + w * .66 + 3, s - 40, 10, 2);
+    ctx.fillStyle = C.dark;
+    for (let jx = x + 10; jx < x + w * .6; jx += 22) { R(jx, s - 21, 10, 3); R(jx + 7, s - 24, 2, 3); }   // parked jets
+    ctx.fillStyle = C.bg;
+    for (let dx = x + 4; dx < x + w - 6; dx += 12) R(dx, s - 16, 6, 1);       // deck markings
+    R(x + w * .66 + 3, s - 30, 3, 3); R(x + w * .66 + 9, s - 30, 3, 3);
+  }
+  ctx.fillStyle = C.dark; R(x + 2, s - Math.min(b.h, 14), 3, Math.min(b.h, 14));   // shaded bow, matches Godzilla's lighting
+  if (b.alive) { ctx.fillStyle = C.spray; const f = Math.floor(t * 12) % 2; R(x - 4 - f * 2, s - 2, 6, 2); R(x - 2, s - 4 + f, 3, 2); }   // bow wave
+}
+
+function drawWater() {
+  if (sea <= 0) return;
+  const wy = Math.round(waterY());
+  ctx.fillStyle = C.water; R(0, wy, W, H - wy);
+  const go = dist % GROUND_LEN;
+  ctx.fillStyle = C.ripple;
+  for (let k = 0; k < 2; k++) for (const r of ripples) {
+    const x = r.x - go + k * GROUND_LEN, y = wy + r.y;
+    if (x > -10 && x < W && y < H) R(x, y, r.w, 1);
+  }
+  ctx.fillStyle = C.fg;                         // the waterline, like the dino's ground line
+  for (let x = 0; x < W; x += 4) {
+    const off = Math.round(Math.sin((x + dist * 0.7) * 0.045 + t * 2) * 1.2);
+    R(x, wy - 1 + off, 4, 1);
+  }
+  ctx.fillStyle = C.bg;                         // foam around Godzilla's legs
+  for (let x = GX + 24; x < GX + 104; x += 4) if (((x >> 2) + Math.floor(t * 14)) % 3 === 0) R(x, wy, 4, 2);
+}
+
+function drawBuilding(b) {
+  if (b.ship) { drawShip(b); return; }
+  const x = b.x;
+  if (b.alive) {
+    const y = GY - b.h;
+    ctx.fillStyle = C.fg;
+    R(x, y, b.w, b.h);
+    if (b.ant) { R(x + b.w/2 - 1, y - b.ant, 2, b.ant); if (Math.sin(t * 5) > 0) R(x + b.w/2 - 2, y - b.ant - 2, 4, 2); }
+    if (b.tank) R(x + b.w - 14, y - 7, 8, 7);
+    if (b.style === 'shop') R(x - 2, y, b.w + 4, 3);
+    ctx.fillStyle = C.dark; R(x, y, 3, b.h);                  // shaded side, matches Godzilla's lighting
+    ctx.fillStyle = C.bg;
+    for (const w of b.wins) R(x + w[0], y + w[1], 3, 5);
+    if (b.style === 'shop') R(x + b.w/2 - 4, GY - 11, 8, 10);
+  } else {
+    const k = Math.min(1, b.ct / 0.35);
+    const hh = b.h * (1 - k);
+    ctx.fillStyle = C.fg;
+    if (hh > 6) {
+      const y = GY - hh;
+      for (let i = 0; i < b.w; i += 3) { const jag = ((i * 7 + b.h) % 11) * k; R(x + i, y + jag, 3, hh - jag); }
+    }
+    const rk = Math.min(1, k * 2);
+    b.rubble.forEach((rh, i) => R(x + i*3, GY - 1 - rh * rk, 3, rh * rk));
+  }
+}
+
+function drawJet(h) {
+  const p = 2;
+  ctx.save();
+  ctx.translate(Math.round(h.x), Math.round(h.y));
+  if (h.fall) { ctx.translate(26, 8); ctx.rotate(h.rot); ctx.translate(-26, -8); }
+  const r = (a, b, c, d) => ctx.fillRect(a*p, b*p, c*p, d*p);
+  ctx.fillStyle = C.fg;
+  r(0, 4, 3, 1); r(2, 3, 20, 3); r(1, 4, 1, 1);                // nose + fuselage
+  r(18, 1, 3, 2); r(19, 0, 4, 1);                               // tail fin
+  r(9, 6, 10, 1); r(12, 7, 7, 1);                               // swept wing
+  r(20, 6, 5, 1);                                               // tail plane
+  ctx.fillStyle = C.dark; r(5, 2, 6, 1); r(22, 3, 2, 3); r(3, 5, 17, 1);
+  ctx.fillStyle = C.bg; r(6, 3, 3, 1);                          // canopy glint
+  if (!h.fall) { ctx.fillStyle = Math.sin(t * 50) > 0 ? C.glow : C.soft; r(24, 4, 2 + (Math.sin(t * 37) > 0 ? 1 : 0), 1); }   // afterburner
+  if (!h.fall && h.mode === 'hover' && h.gunT > 0.08 && h.gunT < 0.16) { ctx.fillStyle = C.claw; r(-2, 3, 2, 3); }
+  ctx.restore();
+}
+
+function drawHeli(h) {
+  if (h.jet) drawJet(h);
+  const p = 2;
+  ctx.save();
+  if (h.jet) ctx.globalAlpha = 0;
+  ctx.translate(Math.round(h.x), Math.round(h.y));
+  if (h.fall) { ctx.translate(22, 10); ctx.rotate(h.rot); ctx.translate(-22, -10); }
+  ctx.fillStyle = C.fg;
+  const r = (a, b, c, d) => ctx.fillRect(a*p, b*p, c*p, d*p);
+  if (!h.fall) { if (h.fr) r(0, 0, 22, 1); else r(5, 0, 12, 1); } else r(8, 0, 6, 1);
+  r(10, 1, 1, 1);
+  r(5, 2, 8, 1); r(3, 3, 11, 1); r(2, 4, 13, 3); r(3, 7, 11, 1);
+  r(14, 4, 7, 2); r(20, 2, 2, 3);
+  if (h.fr) r(19, 1, 1, 5); else r(21, 5, 1, 1);
+  r(5, 8, 1, 1); r(11, 8, 1, 1); r(3, 9, 11, 1);
+  r(0, 6, 3, 1);                                   // nose gun
+  ctx.fillStyle = C.dark; r(2, 6, 13, 1);
+  ctx.fillStyle = C.bg; r(3, 4, 3, 2);
+  if (!h.fall && h.mode === 'hover' && h.gunT > 0.08 && h.gunT < 0.16) { ctx.fillStyle = C.claw; r(-2, 5, 2, 3); }
+  ctx.restore();
+  ctx.globalAlpha = 1;
+  // countdown bar: how long until this chopper takes you down
+  if (h.mode === 'hover' && !h.fall && h.alive) {
+    const f = Math.max(0, h.timer / h.max), bx = Math.round(h.x + 2), by = Math.round(h.y - 9);
+    const blink = h.timer < 1.5 && Math.floor(t * 8) % 2;
+    ctx.fillStyle = C.mid; R(bx, by, 40, 5);
+    ctx.fillStyle = C.bg;  R(bx + 1, by + 1, 38, 3);
+    ctx.fillStyle = blink ? C.bg : C.fg; R(bx + 1, by + 1, 38 * f, 3);
+  }
+}
+
+function drawGodzilla() {
+  let rows;
+  const leg = st === 'playing' ? gz.leg : 0;
+  const punchPose = gz.punchT >= 0 && gz.punchT < (gz.punchHit ? 0.14 : 0.24);
+  if (st === 'over') rows = SPR.DEAD;
+  else if (breathing()) rows = SPR.BREATH;
+  else if (punchPose) rows = leg ? SPR.PUNCH_B : SPR.PUNCH_A;
+  else rows = leg ? SPR.RUN_B : SPR.RUN_A;
+
+  // plates show the atomic charge, filling from the tail toward the head
+  let plate = null;
+  if (breathing()) {
+    if (!beamOn()) { const reach = (gz.breathT / BREATH_WIND) * 50; plate = c => c <= reach ? C.core : C.glow; }
+    else plate = () => (Math.sin(t * 50) > 0 ? C.glow : C.core);
+  } else if (st !== 'over') {
+    if (charged()) plate = () => (gz.fullFlash > 0 && Math.floor(gz.fullFlash * 16) % 2) ? C.core : (Math.sin(t * 6) > 0 ? C.glow : C.soft);
+    else if (gz.charge > 0) { const reach = 8 + (gz.charge / CHARGE_NEED) * 40; plate = c => c <= reach ? C.soft : null; }
+  }
+  const shakeX = gz.hitFlash > 0 ? 1 : 0;
+  drawSprite(rows, GX + shakeX, GZ_TOP, plate);
+}
+
+function drawBeam() {
+  if (!breathing()) return;
+  const dir = beamDir();
+  if (!beamOn()) {   // wind-up glow at the mouth
+    const k = gz.breathT / BREATH_WIND;
+    ctx.fillStyle = C.glow; const s = Math.round(4 + k * 8) * 2;
+    ctx.fillRect(Math.round(MOUTH.x - s / 2), Math.round(MOUTH.y - s / 2), s, s);
+    return;
+  }
+  const len = beamLen(), q = 2;
+  const fade = gz.breathT > BREATH_WIND + BREATH_BEAM - 0.1;
+  const blocks = [];
+  for (let d = 0; d <= len; d += 4) {
+    const x = Math.round((MOUTH.x + dir.x * d) / q) * q, y = Math.round((MOUTH.y + dir.y * d) / q) * q;
+    if (y > GY + 6) break;
+    let h = Math.round(beamHalf(d) * (fade ? 0.5 : 1) / q) * q;
+    if (((d / 4 + Math.floor(t * 30)) % 6) === 0) h += q * 2;
+    blocks.push([x, y, h]);
+  }
+  ctx.fillStyle = C.glow;
+  for (const [x, y, h] of blocks) ctx.fillRect(x - 3, y - h, 8, h * 2);
+  ctx.fillStyle = C.soft;
+  for (const [x, y, h] of blocks) { const c = Math.round(h * 0.62 / q) * q; ctx.fillRect(x - 3, y - c, 8, c * 2); }
+  ctx.fillStyle = C.core;
+  for (const [x, y, h] of blocks) { const c = Math.max(q, Math.round(h * 0.3 / q) * q); ctx.fillRect(x - 3, y - c, 8, c * 2); }
+  ctx.fillStyle = C.core; ctx.fillRect(MOUTH.x - 6, MOUTH.y - 10, 12, 20);
+  ctx.fillStyle = C.glow;
+  for (let i = 0; i < 10; i++) {
+    const b = blocks[(Math.random() * blocks.length) | 0]; if (!b) break;
+    ctx.fillRect(b[0] + rnd(-6, 6) & ~1, b[1] + (Math.random() < .5 ? -1 : 1) * (b[2] + rnd(2, 10)) & ~1, 4, 4);
+  }
+  const end = blocks[blocks.length - 1];
+  if (end) { ctx.fillStyle = C.core; for (let i = 0; i < 5; i++) ctx.fillRect(end[0] + rnd(-12, 12) & ~1, end[1] + rnd(-14, 14) & ~1, 4, 4); }
+}
+
+function drawParts() {
+  for (const p of parts) {
+    ctx.globalAlpha = p.c === 'mid' ? Math.max(0, p.life / p.max) : 1;
+    ctx.fillStyle = p.c === 'glow' ? C.glow : p.c === 'mid' ? C.mid : C.fg;
+    R(p.x, p.y, p.s, p.s);
+  }
+  ctx.globalAlpha = 1;
+}
+function drawBullets() {
+  ctx.fillStyle = C.fg;
+  for (const o of objs) if (o.k === 'bullet') { R(o.x, o.y, 3, 2); R(o.x + 3, o.y, 3, 1); }
+}
+
+function text(str, x, y, size, align = 'center', color = C.fg) {
+  ctx.font = `${size}px ${FONT}`;
+  ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = color;
+  ctx.fillText(str, x, y);
+}
+function hint(label, x, y, blink = true) {
+  if (blink && Math.floor(t * 4) % 2) return;
+  ctx.font = `7px ${FONT}`;
+  const w = ctx.measureText(label).width + 10;
+  const bx = Math.round(Math.max(4, Math.min(W - w - 4, x - w / 2))), by = Math.round(y - 14);
+  ctx.fillStyle = C.fg; ctx.fillRect(bx, by, w, 13);
+  ctx.fillRect(Math.round(x) - 2, by + 13, 4, 3);
+  text(label, bx + w / 2, by + 10, 7, 'center', C.bg);
+}
+function drawHints() {
+  if (st !== 'playing') return;
+  const h = liveHeli();
+  if (h && h.mode === 'hover') {
+    // always tell the player what to do about a chopper — this is the core loop
+    if (charged()) hint('UP!  BLAST IT', h.x + 22, h.y - 12);
+    else hint(`SMASH ${CHARGE_NEED - gz.charge} MORE TO CHARGE`, h.x + 22, h.y - 12);
+  }
+  if (!showHints()) return;
+  for (const o of objs) if (o.k === 'bld' && o.alive && o.x < 380 && o.x > FRONT_X + 40) hint('SPACE', o.x + Math.min(o.w, 60) / 2, bldBase(o) - o.h - 8);
+}
+
+function drawHUD() {
+  const s = score();
+  if (st !== 'start') {
+    const hideScore = milestoneT > 0 && Math.floor(milestoneT * 8) % 2 === 1;
+    const shown = milestoneT > 0 ? lastMilestone * 100 : s;
+    if (!hideScore) text(pad(shown), W - 16, 26, 11, 'right');
+    if (hi > 0) text('HI ' + pad(hi), W - 16 - 55 - 22, 26, 11, 'right', C.mid);
+    // atomic charge: one cell per smashed building
+    const deny = gz.denyT > 0 && Math.floor(gz.denyT * 12) % 2;
+    text('ATOMIC', 16, 26, 8, 'left', deny ? C.fg : C.mid);
+    for (let i = 0; i < CHARGE_NEED; i++) {
+      const x = 70 + i * 16;
+      ctx.fillStyle = C.mid; R(x, 17, 14, 11);
+      ctx.fillStyle = C.bg;  R(x + 1, 18, 12, 9);
+      if (i < gz.charge) { ctx.fillStyle = charged() ? (Math.sin(t * 6) > 0 ? C.glow : C.soft) : C.fg; R(x + 2, 19, 10, 7); }
+    }
+    if (charged()) text('READY - PRESS UP', 70 + CHARGE_NEED * 16 + 8, 26, 7, 'left', C.fg);
+  } else if (hi > 0) {
+    text('HI ' + pad(hi), W - 16, 26, 11, 'right', C.mid);
+  }
+  for (const p of pops) { ctx.globalAlpha = Math.min(1, p.life * 2); text(p.txt, p.x, p.y, 9); }
+  ctx.globalAlpha = 1;
+  if (st === 'start') {
+    if ((t % 1.2) < 0.8) text('PRESS SPACE TO START', W/2 + 70, 92, 12);
+    text('SPACE: PUNCH BUILDINGS - EACH ONE CHARGES YOUR ATOMIC BREATH', W/2 + 70, 120, 7, 'center', C.mid);
+    text('UP / F: ATOMIC BREATH - DESTROYS CHOPPERS, JETS AND SHIPS', W/2 + 70, 136, 7, 'center', C.mid);
+  }
+  if (st === 'over') {
+    text('G A M E   O V E R', W/2 + 60, 72, 15);
+    ctx.strokeStyle = C.fg; ctx.lineWidth = 4;
+    const cx = W/2 + 60;
+    ctx.beginPath(); ctx.arc(cx, 106, 12, -Math.PI * 0.35, Math.PI * 1.45); ctx.stroke();
+    ctx.fillStyle = C.fg;
+    ctx.beginPath(); ctx.moveTo(cx + 4, 87); ctx.lineTo(cx + 15, 95); ctx.lineTo(cx + 3, 100); ctx.fill();
+    if (TIPS[deathCause]) text(TIPS[deathCause], cx, 138, 7, 'center', C.mid);
+  }
+  if (banner && st === 'playing' && Math.floor(banner.life * 5) % 2 === 0) text(banner.txt, W/2 + 60, 80, 14);
+  if (muted) text('MUTED', 16, H - 4, 7, 'left', C.mid);
+}
+
+function draw() {
+  updColors();
+  ctx.save();
+  if (shake > 0) ctx.translate(Math.round(rnd(-1, 1) * shake * 24), Math.round(rnd(-1, 1) * shake * 16));
+  drawBackground();
+  for (const o of objs) if (o.k === 'bld') drawBuilding(o);
+  for (const o of objs) if (o.k === 'heli') drawHeli(o);
+  drawBullets();
+  drawParts();
+  drawGodzilla();
+  drawWater();
+  drawBeam();
+  drawHints();
+  ctx.restore();
+  drawHUD();
+}
+
+// ---------- loop ----------
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(1/30, (now - last) / 1000);
+  last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ---------- input ----------
+window.addEventListener('keydown', e => {
+  const k = e.code;
+  if (['Space','ArrowUp','ArrowDown','ArrowRight','ArrowLeft'].includes(k)) e.preventDefault();
+  if (e.repeat) return;
+  if (k === 'Space' || k === 'Enter') doPunch();
+  else if (k === 'ArrowUp' || k === 'KeyW' || k === 'KeyF' || k === 'ArrowRight') doBreath();
+  else if (k === 'KeyM') muted = !muted;
+});
+cvs.addEventListener('pointerdown', e => { e.preventDefault(); doPunch(); });
+document.querySelectorAll('#touch button').forEach(btn => {
+  btn.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    if (btn.dataset.act === 'punch') doPunch(); else doBreath();
+  });
+});
+
+})();
+</script>
+</body>
+</html>
